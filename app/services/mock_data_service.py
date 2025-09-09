@@ -6,6 +6,7 @@ import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +14,128 @@ class MockDataService:
     """Mock 데이터 서비스"""
     
     def __init__(self):
-        self.bank_products = self._get_mock_bank_products()
-        self.youth_policies = self._get_mock_youth_policies()
+        self.bank_products = self._load_bank_products_from_json()
+        self.youth_policies = self._load_policies_from_json()
         self.user_profiles = self._get_mock_user_profiles()
+
+    def _safe_load_json(self, path: str) -> Optional[Dict[str, Any]]:
+        try:
+            if not os.path.exists(path):
+                logger.warning(f"JSON 파일을 찾을 수 없습니다: {path}")
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"JSON 로드 실패 ({path}): {e}")
+            return None
+
+    def _load_bank_products_from_json(self) -> List[Dict[str, Any]]:
+        """data/bank.json에서 은행 상품 로드. 실패 시 기존 Mock 사용"""
+        data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "bank.json")
+        data = self._safe_load_json(data_path)
+        if not data:
+            return self._get_mock_bank_products()
+
+        # 다양한 스키마 대응
+        products: List[Dict[str, Any]] = []
+        try:
+            # 케이스 1: { result: { bankProducts: [...] } }
+            if isinstance(data, dict):
+                container = data.get("result") or data
+                candidate_lists = [
+                    container.get("bankProducts"),
+                    container.get("products"),
+                    container.get("list"),
+                    container.get("items"),
+                ]
+
+                # 일부 데이터셋에서 정책 리스트가 들어올 수 있어 필터링 필요
+                for lst in candidate_lists:
+                    if isinstance(lst, list) and lst:
+                        # 최소한 상품 식별자 키가 존재하는지 검사
+                        sample = lst[0]
+                        # 정책 데이터(youthPolicyList) 오탑재 회피
+                        if any(k in sample for k in ["productId", "productName", "bankName", "interestRate", "productType"]):
+                            products = lst
+                            break
+
+                # 직접 youthPolicyList가 온 경우는 상품이 아님 → 기본 Mock 반환
+                if not products and container.get("youthPolicyList"):
+                    logger.warning("bank.json에 정책 리스트가 포함되어 있어 기본 Mock 상품을 사용합니다")
+                    return self._get_mock_bank_products()
+
+            # 정규화: msa_client에서 기대하는 필드로 정제
+            normalized: List[Dict[str, Any]] = []
+            for p in products[:200]:
+                normalized.append({
+                    "productId": p.get("productId") or p.get("id") or p.get("code") or p.get("prodId", "BANK_UNKNOWN"),
+                    "productName": p.get("productName") or p.get("name") or p.get("title", "상품"),
+                    "productType": p.get("productType") or p.get("type") or p.get("category", "DEPOSIT"),
+                    "bankCode": p.get("bankCode") or p.get("bank_code") or p.get("bankId", "000"),
+                    "bankName": p.get("bankName") or p.get("bank") or p.get("issuer", "은행"),
+                    "interestRate": p.get("interestRate") or p.get("rate") or p.get("yield") or 3.0,
+                    "minAmount": p.get("minAmount") or p.get("min") or 0,
+                    "maxAmount": p.get("maxAmount") or p.get("max") or 0,
+                    "termMonths": p.get("termMonths") or p.get("term") or 0,
+                    "riskLevel": p.get("riskLevel") or p.get("risk") or 2,
+                    "description": p.get("description") or p.get("desc") or "",
+                    "features": p.get("features") or [],
+                    "targetCustomer": p.get("targetCustomer") or p.get("target") or "일반고객"
+                })
+            if normalized:
+                logger.info(f"bank.json에서 {len(normalized)}개 상품 로드 완료")
+                return normalized
+        except Exception as e:
+            logger.error(f"bank.json 파싱 실패: {e}")
+
+        return self._get_mock_bank_products()
+
+    def _load_policies_from_json(self) -> List[Dict[str, Any]]:
+        """data/policy.json에서 청년 정책 로드. 실패 시 기존 Mock 사용"""
+        data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "policy.json")
+        data = self._safe_load_json(data_path)
+        if not data:
+            # bank.json에 youthPolicyList가 있는 케이스를 보완
+            alt_bank_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "bank.json")
+            alt = self._safe_load_json(alt_bank_path)
+            if alt and isinstance(alt, dict) and isinstance(alt.get("result", {}).get("youthPolicyList"), list):
+                data = alt
+            else:
+                return self._get_mock_youth_policies()
+
+        try:
+            policies_list = None
+            if isinstance(data, dict):
+                container = data.get("result") or data
+                # 대표 키 탐색
+                for key in ["youthPolicyList", "policies", "list", "items"]:
+                    if isinstance(container.get(key), list):
+                        policies_list = container.get(key)
+                        break
+
+            if not isinstance(policies_list, list):
+                return self._get_mock_youth_policies()
+
+            normalized: List[Dict[str, Any]] = []
+            for p in policies_list[:300]:
+                normalized.append({
+                    "policyId": p.get("policyId") or p.get("plcyNo") or p.get("id", "YOUTH_UNKNOWN"),
+                    "policyName": p.get("policyName") or p.get("plcyNm") or p.get("name", "정책"),
+                    "targetAgeMin": int(p.get("targetAgeMin") or p.get("sprtTrgtMinAge") or 0),
+                    "targetAgeMax": int(p.get("targetAgeMax") or p.get("sprtTrgtMaxAge") or 0),
+                    "benefitAmount": float(p.get("benefitAmount") or p.get("bnftAmt") or 0),
+                    "requirements": p.get("requirements") or p.get("addAplyQlfcCndCn") or "",
+                    "applicationPeriod": p.get("applicationPeriod") or p.get("aplyYmd") or "",
+                    "policyType": p.get("policyType") or p.get("lclsfNm") or "",
+                    "description": p.get("description") or p.get("plcyExplnCn") or ""
+                })
+            if normalized:
+                logger.info(f"policy.json에서 {len(normalized)}개 정책 로드 완료")
+                return normalized
+        except Exception as e:
+            logger.error(f"policy.json 파싱 실패: {e}")
+
+        return self._get_mock_youth_policies()
     
     def _get_mock_bank_products(self) -> List[Dict[str, Any]]:
         """Mock 은행 상품 데이터"""
@@ -136,7 +256,12 @@ class MockDataService:
         ]
     
     def _get_mock_user_profiles(self) -> List[Dict[str, Any]]:
-        """Mock 사용자 프로필 데이터"""
+        """Mock 사용자 프로필 데이터 (요구 필드 포함)":
+        - totalAssets: 가용 가능 자산
+        - investmentPreference: 투자 성향 (공격적/균형형/안정형/위험 회피형/중립형)
+        - investmentGoal: 투자 목표
+        - interestSectors: 관심 주식 분야
+        """
         return [
             {
                 "userId": 1,
@@ -144,11 +269,11 @@ class MockDataService:
                 "name": "김청년",
                 "age": 25,
                 "incomeLevel": "중간소득",
-                "totalAssets": 10000000,
-                "investmentPreference": "중립적",
-                "interestSectors": ["IT", "금융"],
-                "riskTolerance": 6,
+                "totalAssets": 15000000,
+                "investmentPreference": "중립형",
                 "investmentGoal": "주택구입",
+                "interestSectors": ["IT", "금융", "필수소비재"],
+                "riskTolerance": 6,
                 "investmentHorizon": "5년"
             },
             {
@@ -158,10 +283,10 @@ class MockDataService:
                 "age": 30,
                 "incomeLevel": "고소득",
                 "totalAssets": 50000000,
-                "investmentPreference": "공격적",
-                "interestSectors": ["IT", "바이오", "반도체"],
-                "riskTolerance": 8,
+                "investmentPreference": "고위험 고수익",
                 "investmentGoal": "자산증식",
+                "interestSectors": ["IT", "바이오", "반도체", "2차전지"],
+                "riskTolerance": 8,
                 "investmentHorizon": "10년"
             },
             {
@@ -171,10 +296,10 @@ class MockDataService:
                 "age": 28,
                 "incomeLevel": "중간소득",
                 "totalAssets": 20000000,
-                "investmentPreference": "보수적",
-                "interestSectors": ["금융", "공공"],
-                "riskTolerance": 3,
+                "investmentPreference": "안정형",
                 "investmentGoal": "안전한자산증식",
+                "interestSectors": ["금융", "공공", "통신"],
+                "riskTolerance": 3,
                 "investmentHorizon": "3년"
             }
         ]

@@ -52,6 +52,90 @@ class PortfolioRecommender:
             "use_mock": getattr(self, "use_mock", True),
             "model": getattr(self, "model", None).__class__.__name__ if not getattr(self, "use_mock", True) else None
         }
+
+    async def generate_simple_recommendation(self, user_profile: Dict[str, Any]) -> Dict[str, Any]:
+        """사용자 정보만으로 간단 포트폴리오 추천"""
+        try:
+            if self.use_mock:
+                return self._mock_simple_recommendation(user_profile)
+            prompt = self._build_simple_prompt(user_profile)
+            response = self.model.generate_content(prompt)
+            return json.loads(response.text)
+        except Exception as e:
+            logger.error(f"단순 추천 실패, Mock 사용: {e}")
+            return self._mock_simple_recommendation(user_profile)
+
+    def _build_simple_prompt(self, user_profile: Dict[str, Any]) -> str:
+        preference = user_profile.get("investment_preference") or user_profile.get("investmentPreference", "중립형")
+        total_assets = user_profile.get("total_assets") or user_profile.get("totalAssets", 10000000)
+        goal = user_profile.get("investment_goal") or user_profile.get("investmentGoal", "자산증식")
+        sectors = user_profile.get("interest_sectors") or user_profile.get("interestSectors", [])
+        return f"""
+        다음 사용자 정보만을 바탕으로, 아래의 권장 비율 규칙을 적용하여 포트폴리오를 추천하세요. 실제 상품명 대신 자산군 레벨로 제시하세요.
+
+        사용자 정보:
+        - 총 가용 자산: {total_assets}
+        - 투자 성향: {preference}
+        - 투자 목표: {goal}
+        - 관심 주식 분야: {', '.join(sectors)}
+
+        권장 비율 규칙:
+        - 고위험 고수익: 주식 70%, 예적금 15%, 채권 15%
+        - 균형형: 주식 50%, 채권 30%, 예적금 20%
+        - 안정형: 주식 20%, 안전채권 50%, 고금리 예적금 30%
+        - 위험 회피형: 주식 15%, 단기 국채/저변동 채권 50%, 고금리 예적금 25%
+        - 중립형: 주식 40%, 채권 40%, 예적금 20%
+
+        출력 형식(JSON):
+        {{
+          "total_investment_amount": 숫자,
+          "allocation": [
+            {{"asset_class": "주식", "percentage": 숫자, "amount": 숫자, "notes": "관심 분야 반영"}},
+            {{"asset_class": "채권", "percentage": 숫자, "amount": 숫자}},
+            {{"asset_class": "예적금", "percentage": 숫자, "amount": 숫자}}
+          ],
+          "recommendation_reason": "텍스트",
+          "rebalancing_tip": "텍스트"
+        }}
+        """
+
+    def _mock_simple_recommendation(self, user_profile: Dict[str, Any]) -> Dict[str, Any]:
+        preference = (user_profile.get("investment_preference") or user_profile.get("investmentPreference") or "중립형").strip()
+        total_assets = float(user_profile.get("total_assets") or user_profile.get("totalAssets") or 10000000)
+        sectors = user_profile.get("interest_sectors") or user_profile.get("interestSectors") or []
+
+        rules = {
+            "고위험 고수익": {"주식": 70, "예적금": 15, "채권": 15},
+            "균형형": {"주식": 50, "채권": 30, "예적금": 20},
+            "안정형": {"주식": 20, "채권": 50, "예적금": 30},
+            "위험 회피형": {"주식": 15, "채권": 50, "예적금": 25},
+            "중립형": {"주식": 40, "채권": 40, "예적금": 20},
+        }
+        # 일부 표현 변형 매핑
+        alias = {
+            "공격적": "고위험 고수익",
+            "보수적": "안정형",
+            "중립": "중립형",
+            "중도": "중립형",
+        }
+        pref_key = alias.get(preference, preference)
+        allocation_rule = rules.get(pref_key, rules["중립형"])
+
+        allocation = []
+        for asset_class, pct in allocation_rule.items():
+            allocation.append({
+                "asset_class": asset_class,
+                "percentage": float(pct),
+                "amount": total_assets * pct / 100.0,
+                "notes": "관심 분야 반영: " + ", ".join(sectors) if asset_class == "주식" and sectors else None
+            })
+
+        return {
+            "total_investment_amount": total_assets,
+            "allocation": allocation,
+            "recommendation_reason": f"사용자 성향({pref_key})과 관심 섹터를 반영한 자산군 배분입니다.",
+            "rebalancing_tip": "분기별 리밸런싱으로 목표 비중 유지 및 리스크 관리"
+        }
     
     async def generate_portfolio_recommendation(
         self, 

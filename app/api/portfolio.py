@@ -264,3 +264,22 @@ async def analyze_user_portfolio(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"포트폴리오 분석 실패: {e}")
         raise HTTPException(status_code=500, detail="포트폴리오 분석 중 오류가 발생했습니다")
+
+# 새 엔드포인트: 사용자 정보만으로 간단 추천
+@router.post("/recommend-simple/{user_id}", response_model=dict)
+async def recommend_simple_portfolio(user_id: int):
+    try:
+        user_profile = await msa_client.get_user_profile(user_id)
+        if not user_profile:
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+        recommendation = await portfolio_recommender.generate_simple_recommendation(user_profile)
+        return {
+            "user_id": user_id,
+            "recommendation": recommendation,
+            "status": "success"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"단순 포트폴리오 추천 실패: {e}")
+        raise HTTPException(status_code=500, detail="단순 추천 중 오류가 발생했습니다")
