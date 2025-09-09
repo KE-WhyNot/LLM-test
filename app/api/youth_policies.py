@@ -6,6 +6,7 @@ from app.database.models import YouthPolicy
 from app.schemas.youth_policy import YouthPolicyResponse, YouthPolicyCreate, YouthPolicyUpdate
 from app.services.msa_client import msa_client
 from app.services.ai_preprocessing import ai_preprocessing_service
+from app.services.file_preprocessor import file_preprocessor
 import os
 import logging
 
@@ -76,21 +77,27 @@ async def preprocess_youth_policies(
 async def preprocess_policies_task(age: Optional[int]):
     """청년 정책 전처리 백그라운드 작업"""
     try:
-        # 1. 정책/상품 MSA에서 원본 데이터 가져오기
+        # 1-a. 파일 기반 원본 데이터 전처리 (data/policy.json)
+        file_processed = await file_preprocessor.preprocess_policy()
+        
+        # 1-b. 정책/상품 MSA에서 원본 데이터 가져오기
         raw_policies = await msa_client.get_youth_policies(age)
         
-        if not raw_policies:
+        # 2. AI 전처리 수행 (MSA 원본)
+        processed_policies = []
+        if raw_policies:
+            processed_policies = await ai_preprocessing_service.preprocess_youth_policies(raw_policies)
+        
+        combined = (file_processed or []) + (processed_policies or [])
+        if not combined:
             logger.warning("전처리할 청년 정책이 없습니다")
             return
         
-        # 2. AI 전처리 수행
-        processed_policies = await ai_preprocessing_service.preprocess_youth_policies(raw_policies)
-        
         # 3. 전처리된 데이터를 정책/상품 MSA로 전송
-        success = await msa_client.send_processed_policies(processed_policies)
+        success = await msa_client.send_processed_policies(combined)
         
         if success:
-            logger.info(f"청년 정책 전처리 완료: {len(processed_policies)}개 정책")
+            logger.info(f"청년 정책 전처리 완료: {len(combined)}개 정책")
         else:
             logger.error("전처리된 청년 정책 전송 실패")
         

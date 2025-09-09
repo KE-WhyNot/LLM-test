@@ -6,6 +6,7 @@ from app.database.models import BankProduct
 from app.schemas.bank_product import BankProductResponse, BankProductFilter, BankProductCreate, BankProductUpdate
 from app.services.msa_client import msa_client
 from app.services.ai_preprocessing import ai_preprocessing_service
+from app.services.file_preprocessor import file_preprocessor
 import os
 import logging
 
@@ -61,7 +62,7 @@ async def preprocess_bank_products(
 ):
     """은행 상품 전처리 (MSA 통신)"""
     try:
-        # 백그라운드에서 상품 전처리 실행
+        # 백그라운드에서 상품 전처리 실행 (파일 기반 + 기존 MSA 기반 병행 가능)
         background_tasks.add_task(preprocess_products_task, product_type)
         
         return {
@@ -76,21 +77,27 @@ async def preprocess_bank_products(
 async def preprocess_products_task(product_type: Optional[str]):
     """은행 상품 전처리 백그라운드 작업"""
     try:
-        # 1. 정책/상품 MSA에서 원본 데이터 가져오기
+        # 1-a. 파일 기반 원본 데이터 전처리 (data/bank.json)
+        file_processed = await file_preprocessor.preprocess_bank()
+        
+        # 1-b. 정책/상품 MSA에서 원본 데이터 가져오기
         raw_products = await msa_client.get_bank_products({"product_type": product_type} if product_type else None)
         
-        if not raw_products:
+        # 2. AI 전처리 수행 (MSA 원본)
+        processed_products = []
+        if raw_products:
+            processed_products = await ai_preprocessing_service.preprocess_bank_products(raw_products)
+        
+        combined = (file_processed or []) + (processed_products or [])
+        if not combined:
             logger.warning("전처리할 은행 상품이 없습니다")
             return
         
-        # 2. AI 전처리 수행
-        processed_products = await ai_preprocessing_service.preprocess_bank_products(raw_products)
-        
         # 3. 전처리된 데이터를 정책/상품 MSA로 전송
-        success = await msa_client.send_processed_products(processed_products)
+        success = await msa_client.send_processed_products(combined)
         
         if success:
-            logger.info(f"은행 상품 전처리 완료: {len(processed_products)}개 상품")
+            logger.info(f"은행 상품 전처리 완료: {len(combined)}개 상품")
         else:
             logger.error("전처리된 은행 상품 전송 실패")
         
